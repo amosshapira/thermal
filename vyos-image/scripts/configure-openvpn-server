@@ -1,0 +1,98 @@
+#!/usr/bin/python
+
+# Configure as an OpenVPN server
+
+import itertools
+import re
+import sys
+import yaml
+import commands # we are limited to Python 2.6 on VyOS 1.1.7
+
+def print_err(message):
+  sys.stderr.write(message)
+
+
+def read_stack_config_yaml():
+  with open('/usr/local/etc/stack-config.yaml') as f:
+    return yaml.load(f)
+
+
+def get_dns_server():
+  expression = re.compile('^nameserver\s+([0-9.]+)')
+  with open('/etc/resolv.conf') as f:
+   for line in f:
+     server = expression.match(line)
+     if server:
+       return server.group(1)
+
+  print_err("WOW! Didn't find DNS server\n")
+  return None
+
+
+def get_eth0_address():
+  status, output = commands.getstatusoutput('/bin/ip -o -4 address')
+
+  if status != 0:
+    return None
+
+  for line in output.split('\n'):
+    words = line.split()
+    if len(words) >= 4 and words[1] == 'eth0':
+      return (words[3].split('/'))[0]
+
+  return None
+
+
+def check_openvpn_server_true():
+  stack_config = read_stack_config_yaml()
+  if 'openvpn_server' in stack_config and stack_config['openvpn_server']:
+    print_err("openvpn_server is True; going to configure it\n")
+  else:
+    print_err("openvpn_server is not True, skipping\n")
+    sys.exit(0)
+
+
+def create_openvpn_configuration(dns_server, eth0_address):
+  print ("""#!/bin/vbash
+source /opt/vyatta/etc/functions/script-template
+
+configure
+set interfaces openvpn vtun0 local-port '1194'
+set interfaces openvpn vtun0 mode 'server'
+set interfaces openvpn vtun0 openvpn-option '--plugin /usr/lib/openvpn/openvpn-auth-ldap.so /config/auth/ldap-auth.config'
+set interfaces openvpn vtun0 openvpn-option '--script-security 2'
+set interfaces openvpn vtun0 openvpn-option '--remap-usr1 SIGHUP'
+set interfaces openvpn vtun0 protocol 'udp'
+set interfaces openvpn vtun0 server name-server '%(dns_server)s'
+set interfaces openvpn vtun0 server name-server '8.8.8.8'
+set interfaces openvpn vtun0 server push-route '172.16.0.0/12'
+set interfaces openvpn vtun0 server subnet '10.206.109.0/24'
+set interfaces openvpn vtun0 tls ca-cert-file '/config/auth/keys/ca.crt'
+set interfaces openvpn vtun0 tls cert-file '/config/auth/keys/vyosserver.crt'
+set interfaces openvpn vtun0 tls dh-file '/config/auth/keys/dh2048.pem'
+set interfaces openvpn vtun0 tls key-file '/config/auth/keys/vyosserver.key'
+set nat source rule 200 outbound-interface 'any'
+set nat source rule 200 source address '10.206.109.0/24'
+set nat source rule 200 translation address '%(eth0_address)s'
+set protocols static interface-route 10.206.109.0/24 next-hop-interface 'vtun0'
+
+commit
+save
+exit # from "configure"
+
+run reset vpn remote-access all # restart OpenVPN server
+
+exit
+""" % locals())
+
+def main():
+  check_openvpn_server_true()
+
+  dns_server = get_dns_server()
+  eth0_address = get_eth0_address()
+
+  create_openvpn_configuration(dns_server, eth0_address)
+
+
+if __name__ == '__main__':
+    main()

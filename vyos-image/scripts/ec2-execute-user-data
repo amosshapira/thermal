@@ -1,0 +1,125 @@
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides:          ec2-fetch-user-data-and-start-config
+# Required-Start:    vyatta-router
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:
+# Short-Description: AWS EC2 instance init to fetch userdata and run auto-config
+# Description:       Retrieve configuration files from userdata and invoke the
+#                    automatic VPN configuration script
+### END INIT INFO
+
+# Author: Amos Shapira <amos.shapira@gmail.com>
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# copy output to logger, so it is available in /var/log/messages
+exec &> >(logger -t ec2-fetch-user-data-and-start-config)
+
+finish() {
+  echo Ended
+}
+
+trap finish EXIT
+
+echo Started
+
+. /lib/lsb/init-functions
+
+# Check that we are on EC2, stop if we are not
+
+if ! env LANG=C /opt/vyatta/sbin/ec2-check.pl
+then
+  echo Not on EC2, exiting
+  exit 0
+fi
+
+echo original groups output: \"$(groups)\"
+
+# Add vyattacfg group to our process
+if [ $(groups | awk '{print $1}') != 'vyattacfg' ]
+then
+  echo restarting as vyattacfg user
+  exec sg vyattacfg "$0" "$@"
+  # If we return from 'exec' then something is wrong
+  echo FAILED to re-exec with group \"vyattacfg\"
+  exit 1
+else
+  echo already executing with group \"vyattacfg\", continuing
+fi
+
+userdata_url=http://169.254.169.254/latest/user-data/
+auto_generated_vbash=/usr/local/etc/automatic-ipsec-configuration.vbash
+openvpn_config_vbash=/usr/local/etc/automatic-openvpn-configuration.vbash
+
+# download userdata, exit of not found
+userdata_status=$(curl -s -w '%{http_code}' -o /usr/local/etc/userdata 169.254.169.254/latest/user-data/)
+if [ "$userdata_status" != "200" ]
+then
+  echo No UserData supplied. Exiting.
+  exit 0
+else
+  echo Found UserData
+fi
+
+# extract the files under /usr/local/etc
+if ! (cd /usr/local/etc; /bin/bash userdata)
+then
+  echo UserData failed to execute
+  exit 0
+else
+  echo UserData executed successfully
+fi
+
+# generate the configuration
+if ! /usr/local/bin/configure-ipsec-client > $auto_generated_vbash
+then
+  echo Automatic IPSEC client configuration generation failed
+  exit 1
+else
+  echo Automatic IPSEC client configuration generation succeeded
+fi
+
+chmod +x $auto_generated_vbash
+
+if ! $auto_generated_vbash
+then
+  echo Something went wrong with IPSEC client configuration script
+  exit 1
+else
+  echo IPSEC client configuration succeeded
+fi
+
+# configure OpenVPN server if the stack configuration says so
+echo Configuring OpenVPN server
+cp -av /usr/local/etc/openvpn-auth-ldap/* /config/auth/
+chgrp -R vyattacfg /config/auth
+
+if ! /usr/local/bin/configure-openvpn-server > $openvpn_config_vbash
+then
+  echo OpenVPN server configuration generation failed
+else
+  echo OpenVPN server configuration generation succeeded
+  if [ -s $openvpn_config_vbash ]
+  then
+    echo OpenVPN server configuration vbash is non-empty, executing it
+    chmod +x $openvpn_config_vbash
+    if ! $openvpn_config_vbash
+    then
+      echo Something went wrong with OpenVPN server configuration script
+    else
+      echo OpenVPN server configuration succeeded
+    fi
+  else
+    echo OpenVPN server configuration vbash is empty, skipping
+  fi
+fi
+
+# Make sure that the system can keep changing things
+/bin/chgrp -R vyattacfg /opt/vyatta/config
+
+/usr/local/bin/ha-nat &
+echo $! > /var/run/ha-nat.pid
+
+exit 0

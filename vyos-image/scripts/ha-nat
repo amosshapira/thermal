@@ -1,0 +1,341 @@
+#!/usr/bin/python
+
+# TODO: Still no support for cfn-signal, so only one instance can come up
+# for now. AutoScalingGroup can be configured with exactly one instance
+# and to replace the single instance if it is stopped.
+
+import sys
+import boto.ec2
+import boto.utils
+import boto.vpc
+import yaml
+import atexit
+
+PRIMARY = False
+
+DEFAULT_ROUTE = '0.0.0.0/0'
+RFC_1918_SUBNETS = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']
+INTERNAL_SUBNET = '172.16.0.0/12'
+
+def print_error(message):
+  sys.stderr.write('ha-nat: ' + message)
+
+
+def main():
+  print_error('started\n')
+  atexit.register(print_error, 'finished\n')
+
+  region = get_region()
+  my_instance_id = get_instance_id()
+  vpc_id = get_vpc_id()
+  vpc_stack_name = get_vpc_stack_name()
+
+  vpc_connection = boto.vpc.connect_to_region(region)
+  ec2_connection = boto.ec2.connect_to_region(region)
+  stack_name = get_stack_name(ec2_connection)
+
+  turn_off_source_dest_check(ec2_connection, my_instance_id)
+
+  public_route_table, private_route_table = get_route_tables(vpc_connection,
+    vpc_id)
+
+  if public_route_table == None:
+    print_error("Failed to find public route table ID\n")
+    send_resource_signal('FAILURE')
+    sys.exit(1)
+
+  if private_route_table == None:
+    print_error("Failed to find private route table ID\n")
+    send_resource_signal('FAILURE') # ???
+    sys.exit(1)
+
+  # TODO: For now we don't really run more than one instance. We need to convert
+  # the old bash code which monitors the other instance (if it is primary) and
+  # signals the AutoScalingGroup to kill it. Then we'll have another call to
+  # a yet-to-be-defined "monitor_other_instance" function
+
+  # other_nat_id, other_nat_ip = get_other_nat_instance(ec2_connection,
+  #   my_instance_id, stack_name)
+  other_nat_id, other_nat_ip = None, None
+
+  point_eip_to_me(ec2_connection, vpc_stack_name, my_instance_id)
+  point_default_route_to_me(vpc_connection, private_route_table, my_instance_id,
+    other_nat_id)
+  point_internal_route_to_me(vpc_connection, public_route_table, my_instance_id)
+
+  sys.exit(0)
+
+
+def point_eip_to_me(ec2_connection, vpc_stack_name, instance_id):
+  with open('/usr/local/etc/eips.yaml') as f:
+    eips = yaml.load(f)
+
+  if vpc_stack_name not in eips:
+    print_err('point_eip_to_me: "%(vpc_stack_name)s": not found in eips\n' %
+      locals())
+    return
+
+  if 'public_ip' not in eips[vpc_stack_name]:
+    print_err('point_eip_to_me: "%(vpc_stack_name)s": no \'public_ip\' found\n'
+      % locals())
+    return
+
+  public_ip = eips[vpc_stack_name]['public_ip']
+  allocation_id = eips[vpc_stack_name]['allocation_id']
+
+  if ec2_connection.associate_address(allocation_id=allocation_id, instance_id=instance_id,
+    allow_reassociation=True):
+    print_error('point_eip_to_me: successfully pointed IP address "%(public_ip)s" '
+      'of allocation_id "%(allocation_id)s" to my instance id "%(instance_id)s"\n'
+      % locals())
+  else:
+    print_error('point_eip_to_me: FAILED to point IP address "%(public_ip)s" '
+      'of allocation_id "%(allocation_id)s" to my instance id "%(instance_id)s"'
+      % locals())
+
+
+def get_vpc_stack_name():
+  with open('/usr/local/etc/stack-config.yaml') as f:
+    stack_config = yaml.load(f)
+
+  return stack_config['vpc']
+
+
+def get_region():
+  return boto.utils.get_instance_identity()['document']['region']
+
+
+def get_instance_id():
+  return boto.utils.get_instance_identity()['document']['instanceId']
+
+
+def get_vpc_id():
+  metadata = boto.utils.get_instance_metadata()
+  mac = metadata['mac']
+  return metadata['network']['interfaces']['macs'][mac]['vpc-id']
+
+
+def get_stack_name(ec2_connection):
+  # actually returns the auto-generated CloudFormation stack-name tag
+  tags = ec2_connection.get_all_tags(
+    filters={
+      'resource-id': get_instance_id(),
+      'key': 'aws:cloudformation:stack-name'
+    })
+  if tags:
+    return tags[0].value
+  else:
+    print_error('get_local_vpc: No aws:cloudformation:stack-name tag found\n')
+    return None
+
+
+def turn_off_source_dest_check(ec2_connection, instance_id):
+  eni = ec2_connection.get_all_network_interfaces(
+    filters={
+      'attachment.instance_id':instance_id,
+      'attachment.device_index':'0'
+    })
+
+  if eni:
+    ec2_connection.modify_network_interface_attribute(
+      eni[0].id,
+      attr='sourceDestCheck',
+      value=False)
+  else:
+    print_error('Failed to find network interface\n')
+
+
+# TODO: only consider other NAT instances built from the same version of
+# the stack as us. Perhaps do this by having a unique id tag set by
+# CloudFormation every time the template is provisioned.
+# If we don't do this then the current instance could see that the route
+# points to an old EC2 instance which is about to be terminated by the
+# AutoScalingGroup
+def get_other_nat_instance(ec2_connection, my_instance_id, stack_name):
+  reservations = ec2_connection.get_all_instances(
+    filters={
+      "tag:aws:cloudformation:stack-name":stack_name
+    })
+
+  other_nat_id = None
+  other_nat_ip = None
+
+  print('get_other_nat_instance: my_instance_id: %(my_instance_id)s' % locals())
+
+  for reservation in reservations:
+    for instance in reservation.instances:
+      print('get_other_nat_instance: inspecting: \"%s"' % instance.id)
+      if instance.id == my_instance_id:
+        print('get_other_nat_instance: skipping %s' % instance.id)
+        continue
+      if other_nat_id:
+        print_error('Found more than one other NAT instance')
+        break
+      else:
+        print('get_other_nat_instance: assigning %s' % instance.id)
+        other_nat_id = instance.id
+        other_nat_ip = instance.private_ip_address
+
+  return other_nat_id, other_nat_ip
+
+
+def get_route_tables(vpc_connection, vpc_id):
+  public_route_table = get_route_table(vpc_connection, vpc_id,
+    'PublicRouteTable')
+  private_route_table = get_route_table(vpc_connection, vpc_id,
+    'PrivateRouteTable')
+
+  return public_route_table, private_route_table
+
+
+def get_route_table(vpc_connection, vpc_id, table_name):
+  # get_all_route_tables returns also entries with .id=None,
+  # we need to filter them out
+  route_table = filter(lambda table: table.id,
+    vpc_connection.get_all_route_tables(
+    filters={
+      'tag:logical-id': table_name,
+      'vpc-id': vpc_id
+    }) + vpc_connection.get_all_route_tables(
+    filters={
+      'tag:aws:cloudformation:logical-id': table_name,
+      'vpc-id': vpc_id
+    }))
+
+  if len(route_table) == 1:
+    return route_table[0]
+  elif len(route_table) == 0:
+    print_error("Didn't find route table with logical-id \"%(table_name)s\"\n" %
+      locals())
+    return None
+  else:
+    print_error("Found more than one matching tables with "
+      "logical-id \"%(table_name)s\": \"%(route_table)s\"\n" % locals())
+
+
+def get_gateway(route_table, cidr):
+  print_error(
+    "get_gateway: looking for gateway %(cidr)s in route table %(route_table)s\n"
+      % locals())
+
+  for index, route in enumerate(route_table.routes):
+    print_error("get_gateway: %d: %s %s\n" % (index,
+      (route.gateway_id or route.instance_id), route.destination_cidr_block))
+
+  route = [route for route in route_table.routes if
+    route.destination_cidr_block == cidr]
+
+  print_error("get_gateway: found route: \"%(route)s\"\n" % locals())
+
+  if len(route) > 1:
+    print_error(
+      "get_route_gateway: Found more than one route to %(cidr)s in "
+      "%(route_table)s\n" %
+        locals())
+    return None
+  elif len(route) == 1:
+    print_error("get_gateway: returning route %s\n" % route[0])
+    return route[0]
+  else:
+    print_error("get_gateway: no default routes found in %(route_table)s\n" %
+      locals())
+    return None
+
+
+def update_routes(vpc_connection, route_table, destinations, instance_id):
+  if type(destinations) is not list:
+    destinations = [destinations]
+
+  for destination in destinations:
+    if get_gateway(route_table, destination):
+      update_route(vpc_connection, route_table, destination, instance_id)
+    else:
+      add_route(vpc_connection, route_table, destination, instance_id)
+
+
+def update_route(vpc_connection, route_table, destination, instance_id):
+  route_table_id = route_table.id
+  print_error('update_route: route_table: %(route_table_id)s, '
+    'destination %(destination)s points to me at %(instance_id)s\n' % locals())
+
+  vpc_connection.replace_route(route_table.id, destination,
+    instance_id=instance_id)
+
+
+def add_route(vpc_connection, route_table, destination, instance_id):
+  route_table_id = route_table.id
+  print_error('add_route: route_table: %(route_table_id)s, '
+    'destination %(destination)s points to me at %(instance_id)s\n' % locals())
+
+  vpc_connection.create_route(route_table.id, destination,
+    instance_id=instance_id)
+
+
+def point_internal_route_to_me(vpc_connection, route_table, instance_id):
+  global PRIMARY, INTERNAL_SUBNET, RFC_1918_SUBNETS
+
+  if PRIMARY == False:
+    print_error("point_internal_route_to_me: not primary. Skipped.\n")
+    return
+
+  current_route = get_gateway(route_table, INTERNAL_SUBNET)
+  if current_route:
+    current_gateway = current_route.instance_id
+  else:
+    current_gateway = None
+
+  if current_gateway == instance_id:
+    print_error(
+      "Leaving internal route %(current_route)s in public table "
+      "%(route_table)s pointing to gateway %(current_gateway)s unchanged.\n" %
+        locals())
+  else:
+    print_error(
+      "Taking over internal routes %(current_route)s in public table "
+      "%(route_table)s from gateway %(current_gateway)s\n" %
+        locals())
+    update_routes(vpc_connection, route_table, RFC_1918_SUBNETS, instance_id)
+
+
+def point_default_route_to_me(vpc_connection, route_table, instance_id,
+  other_nat_id):
+  global PRIMARY, DEFAULT_ROUTE
+
+  current_route = get_gateway(route_table, DEFAULT_ROUTE)
+  if current_route:
+    current_gateway = current_route.instance_id or current_route.gateway_id
+  else:
+    current_gateway = None
+
+  print_error('point_default_route_to_me: other_nat_id: "%(other_nat_id)s"; '
+    'current_gateway: %(current_gateway)s\n' % locals())
+
+  if other_nat_id and current_gateway == other_nat_id:
+    print_error(
+      "Should leave default route in private table %(route_table)s points to "
+      "other instance: %(current_gateway)s? I am not PRIMARY.\n" %
+        locals())
+    print_error('Forcing myself as PRIMARY anyway\n')
+    PRIMARY = True
+  elif current_gateway == instance_id:
+    print_error(
+      "Private table default route already points to me: %(current_gateway)s. "
+      "I'm PRIMARY. Nothing to change.\n" %
+      locals())
+    PRIMARY = True
+  else:
+    print_error(
+      "Taking over default route in private table %(route_table)s from current"
+      " value: %(current_gateway)s\n" %
+      locals())
+    update_routes(vpc_connection, route_table, DEFAULT_ROUTE, instance_id)
+    PRIMARY = True
+
+
+def send_resource_signal(message):
+  print_error("send_resource_signal: not implemented yet, message: \"%(message)s\"\n"
+    % locals())
+
+
+if __name__ == '__main__':
+    main()

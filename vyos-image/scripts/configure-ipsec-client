@@ -1,0 +1,294 @@
+#!/usr/bin/python
+
+# Configure IPSec tunnels based on remote Virtual Gateway XML configuration.
+
+import yaml
+import itertools
+import boto.cloudformation
+import boto.vpc
+import boto.utils
+import boto.ec2
+import re
+import sys
+import os
+import xml.etree.ElementTree as ET
+import commands # we are limited to Python 2.6 on VyOS 1.1.7
+
+instance_metadata = boto.utils.get_instance_metadata(timeout=0.5, num_retries=1)
+
+def print_err(message):
+  sys.stderr.write(message)
+
+
+def read_vpcs_yaml():
+  with open('/usr/local/etc/vpcs.yaml') as f:
+    return yaml.load(f)
+
+
+def read_eips_yaml():
+  with open('/usr/local/etc/eips.yaml') as f:
+    return yaml.load(f)
+
+
+def read_stack_config_yaml():
+  with open('/usr/local/etc/stack-config.yaml') as f:
+    return yaml.load(f)
+
+
+def get_local_region():
+  return instance_metadata['placement']['availability-zone'][:-1]
+
+
+def get_instance_id():
+  return instance_metadata['instance-id']
+
+
+def get_local_vpc(stack_config):
+  return stack_config['vpc']
+
+
+def get_local_vpc_cidr(vpcs, local_vpc):
+  return vpcs['vpcs'][local_vpc]['cidr']
+
+
+def get_local_vpc_region(vpcs, local_vpc):
+  if 'region' in vpcs['vpcs'][local_vpc]:
+    return vpcs['vpcs'][local_vpc]['region']
+  else:
+    return None
+
+
+def get_local_bgp_asn(vpcs, local_vpc):
+  return vpcs['vpcs'][local_vpc]['bgp_asn']
+
+
+def get_eth0_address():
+  status, output = commands.getstatusoutput('/bin/ip -o -4 address')
+
+  if status != 0:
+    return None
+
+  for line in output.split('\n'):
+    words = line.split()
+    if len(words) >= 4 and words[1] == 'eth0':
+      return (words[3].split('/'))[0]
+
+  return None
+
+
+def get_default_route():
+  status, output = commands.getstatusoutput('/bin/ip -o -4 route')
+
+  if status != 0:
+    return None
+
+  for line in output.split('\n'):
+    words = line.split()
+    if len(words) >= 3 and words[0] == 'default':
+      return words[2]
+
+  return None
+
+
+def get_eip_public_ip(eips, local_vpc):
+  if local_vpc not in eips:
+    print_err('get_eip_public_ip: "%s": not found in eips\n' % local_vpc)
+    return None
+
+  if 'public_ip' not in eips[local_vpc]:
+    print_err('get_eip_public_ip: "%s": no \'public_ip\' found\n' % local_vpc)
+    return None
+
+  return eips[local_vpc]['public_ip']
+
+
+def get_remote_vpcs(vpcs, local_vpc):
+  return list(itertools.chain.from_iterable(
+    x['to'] for x in vpcs['connections'].values() if local_vpc in x['from']))
+
+
+# returns the customer gateway configuration of the VPC connection on the remote
+# vpc 'connect_to' which is ready to accept connections from 'local_vpc'
+def get_customer_gateway_configuration(remote_vpc, region, local_vpc):
+  boto_vpc_conn = boto.vpc.connect_to_region(region)
+  vpn_connections = boto_vpc_conn.get_all_vpn_connections()
+  for vpn_connection in vpn_connections:
+    if ('RemoteVPC' in vpn_connection.tags and
+      vpn_connection.tags['RemoteVPC'] == local_vpc):
+        if vpn_connection.state in ['available', 'pending']:
+          configuration = vpn_connection.customer_gateway_configuration
+          with os.fdopen(os.open('vpn-connection-%s.xml' % region,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0600), 'w') as f:
+            f.write(configuration)
+          return configuration
+        else:
+          print_err(
+            'Remote VPN connection "%s" is in state were it cannot accept '
+            'connections: state: "%s"\n' %
+            (vpn_connection.id, vpn_connection.state))
+          return None
+
+
+def create_vbash_script_header():
+  print """#!/bin/vbash
+source /opt/vyatta/etc/functions/script-template
+
+configure
+"""
+
+
+def create_vbash_script_trailer():
+  print """commit
+save
+exit
+"""
+
+def create_vyos_configuration(local_vpc_cidr, local_vpc_region, bgp_asn):
+  create_common_configuration()
+  create_nat_rules(local_vpc_cidr)
+  create_static_routes(local_vpc_region, bgp_asn)
+
+
+def create_common_configuration():
+  print """
+set vpn ipsec esp-group AWS compression 'disable'
+set vpn ipsec esp-group AWS lifetime '3600'
+set vpn ipsec esp-group AWS mode 'tunnel'
+set vpn ipsec esp-group AWS pfs 'enable'
+set vpn ipsec esp-group AWS proposal 1 encryption 'aes128'
+set vpn ipsec esp-group AWS proposal 1 hash 'sha1'
+set vpn ipsec ike-group AWS dead-peer-detection action 'restart'
+set vpn ipsec ike-group AWS dead-peer-detection interval '15'
+set vpn ipsec ike-group AWS dead-peer-detection timeout '30'
+set vpn ipsec ike-group AWS lifetime '28800'
+set vpn ipsec ike-group AWS proposal 1 dh-group '2'
+set vpn ipsec ike-group AWS proposal 1 encryption 'aes128'
+set vpn ipsec ike-group AWS proposal 1 hash 'sha1'
+set vpn ipsec nat-traversal 'enable'
+set vpn ipsec ipsec-interfaces interface 'eth0'
+set system login user vyos authentication encrypted-password '*'
+set system package repository community url 'http://dev.packages.vyos.net/vyos'
+"""
+
+
+def create_nat_rules(local_vpc_cidr):
+  # exclude all RFC-1918 internal addresses from SNAT
+  for index, subnet in enumerate(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'], start=10):
+    print """
+set nat source rule %(index)d destination address '%(subnet)s'
+set nat source rule %(index)d 'exclude'
+set nat source rule %(index)d outbound-interface 'eth0'
+""" % locals()
+
+  print """
+set nat source rule 100 outbound-interface 'eth0'
+set nat source rule 100 protocol 'all'
+set nat source rule 100 source address '%(local_vpc_cidr)s'
+set nat source rule 100 translation address 'masquerade'
+""" % locals()
+
+
+def create_static_routes(local_vpc_region, bgp_asn):
+  if local_vpc_region == None:
+    print_err('create_static_routes: no local vpc region, skipping\n')
+    return
+
+  default_route = get_default_route()
+  boto_vpc_conn = boto.vpc.connect_to_region(local_vpc_region)
+  vpc_id = instance_metadata['network']['interfaces']['macs'].values()[0]['vpc-id']
+  own_subnet_id = instance_metadata['network']['interfaces']['macs'].values()[0]['subnet-id']
+  subnets = boto_vpc_conn.get_all_subnets(filters={'vpcId': vpc_id})
+
+  for subnet in subnets:
+    network = subnet.cidr_block
+    print "set protocol bgp %(bgp_asn)s network '%(network)s'\n" % locals()
+
+  for subnet in subnets:
+    if subnet.id != own_subnet_id:
+      cidr_block = subnet.cidr_block
+      print "set protocol static route %(cidr_block)s next-hop %(default_route)s distance 10\n" % locals()
+
+
+def configure_ipsec_tunnels(local_vpc, remote_vpc, cgw_config, local_vpc_cidr,
+  remote_vpc_cidr, my_public_ip):
+  eth0_address = get_eth0_address()
+  root = ET.fromstring(cgw_config)
+
+  for index, ipsec_tunnel in enumerate(root.findall('.//ipsec_tunnel'), 1):
+    tunnel_inside_address_cidr = ipsec_tunnel.find('./customer_gateway/tunnel_inside_address/network_cidr').text
+    local_inside_address = ipsec_tunnel.find('./customer_gateway/tunnel_inside_address/ip_address').text
+    # also available from our own configuration
+    local_bgp_asn = ipsec_tunnel.find('./customer_gateway/bgp/asn').text
+    remote_inside_address = ipsec_tunnel.find('./vpn_gateway/tunnel_inside_address/ip_address').text
+    remote_outside_address = ipsec_tunnel.find('./vpn_gateway/tunnel_outside_address/ip_address').text
+    remote_bgp_asn = ipsec_tunnel.find('./vpn_gateway/bgp/asn').text
+    bgp_holdtime = ipsec_tunnel.find('./vpn_gateway/bgp/hold_time').text
+    psk = ipsec_tunnel.find('./ike/pre_shared_key').text
+
+    print """
+set interfaces vti vti%(index)d address '%(local_inside_address)s/%(tunnel_inside_address_cidr)s'
+set interfaces vti vti%(index)d description 'VPC tunnel %(index)d'
+set interfaces vti vti%(index)d mtu '1436'
+set protocols bgp %(local_bgp_asn)s neighbor %(remote_inside_address)s remote-as '%(remote_bgp_asn)s'
+set protocols bgp %(local_bgp_asn)s neighbor %(remote_inside_address)s soft-reconfiguration 'inbound'
+set protocols bgp %(local_bgp_asn)s neighbor %(remote_inside_address)s timers holdtime '%(bgp_holdtime)s'
+set protocols bgp %(local_bgp_asn)s neighbor %(remote_inside_address)s timers keepalive '30'
+set vpn ipsec site-to-site peer %(remote_outside_address)s authentication mode 'pre-shared-secret'
+set vpn ipsec site-to-site peer %(remote_outside_address)s authentication pre-shared-secret '%(psk)s'
+set vpn ipsec site-to-site peer %(remote_outside_address)s authentication id %(my_public_ip)s
+set vpn ipsec site-to-site peer %(remote_outside_address)s connection-type 'initiate'
+set vpn ipsec site-to-site peer %(remote_outside_address)s description 'VPC tunnel %(index)d'
+set vpn ipsec site-to-site peer %(remote_outside_address)s ike-group 'AWS'
+set vpn ipsec site-to-site peer %(remote_outside_address)s ikev2-reauth 'inherit'
+set vpn ipsec site-to-site peer %(remote_outside_address)s local-address '%(eth0_address)s'
+set vpn ipsec site-to-site peer %(remote_outside_address)s vti bind 'vti%(index)d'
+set vpn ipsec site-to-site peer %(remote_outside_address)s vti esp-group 'AWS'
+""" % locals()
+
+def main():
+  vpcs = read_vpcs_yaml()
+  eips = read_eips_yaml()
+  stack_config = read_stack_config_yaml()
+
+  local_vpc = get_local_vpc(stack_config)
+  local_vpc_cidr = get_local_vpc_cidr(vpcs, local_vpc)
+  local_vpc_region = get_local_vpc_region(vpcs, local_vpc)
+  my_public_ip = get_eip_public_ip(eips, local_vpc)
+  remote_vpcs = get_remote_vpcs(vpcs, local_vpc)
+  bgp_asn = get_local_bgp_asn(vpcs, local_vpc)
+
+  create_vbash_script_header()
+
+  create_vyos_configuration(local_vpc_cidr, local_vpc_region, bgp_asn)
+
+  for remote_vpc in remote_vpcs:
+    if isinstance(remote_vpc, dict):
+      remote_vpc_name = remote_vpc.keys()[0]
+    else:
+      remote_vpc_name = remote_vpc
+
+    if remote_vpc_name not in vpcs['vpcs']:
+      print_err('%s: remote vpc not found in "vpcs". Skipping.\n' % remote_vpc_name)
+      continue
+
+    remote_vpc_config = vpcs['vpcs'][remote_vpc_name]
+    remote_vpc_cidr = remote_vpc_config['cidr']
+
+    if 'region' not in remote_vpc_config:
+      print_err('%(remote_vpc_name)s: not an AWS network, skipping' %
+        locals())
+    else:
+      cgw_config = get_customer_gateway_configuration(remote_vpc,
+        remote_vpc_config['region'], local_vpc)
+      if cgw_config:
+          configure_ipsec_tunnels(local_vpc, remote_vpc, cgw_config,
+            local_vpc_cidr, remote_vpc_cidr, my_public_ip)
+      else:
+        print_err(
+          '%(remote_vpc)s: no Customer Gateway configuration found. '
+          'Skipping.\n' % locals())
+
+  create_vbash_script_trailer()
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,67 @@
+{
+  "variables": {
+    "vyos_release": "1.1.7"
+  },
+  "builders": [{
+    "type": "amazon-ebs",
+    "region": "ap-southeast-2",
+    "source_ami": "ami-ba3e14d9",
+    "subnet_id": "{{user `subnet_id`}}",
+    "vpc_id": "{{user `vpc_id`}}",
+    "associate_public_ip_address": true,
+    "instance_type": "t2.nano",
+    "ssh_username": "ubuntu",
+    "ssh_port": 122,
+    "ssh_timeout": "12m",
+    "ami_name": "VyOS-{{user `vyos_release`}} {{timestamp}}",
+    "user_data_file": "./files/aws-user-data.sh",
+    "launch_block_device_mappings": [
+      {
+        "device_name": "/dev/sda1",
+        "volume_size": 8,
+        "delete_on_termination": true
+      },
+      {
+        "device_name": "/dev/sdf",
+        "volume_size": 8,
+        "delete_on_termination": true
+      }
+    ],
+    "ami_block_device_mappings": [
+      {
+        "device_name": "/dev/sda1",
+        "volume_size": 8,
+        "delete_on_termination": true
+      },
+      {
+        "device_name": "/dev/sdf",
+        "volume_size": 0,
+        "virtual_name": "ephemeral0"
+      }
+    ]
+  }],
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": [
+        "mkdir -p /tmp/vyos-build"
+      ]
+    },
+    {
+      "type": "file",
+      "source": "./scripts",
+      "destination": "/tmp/vyos-build"
+    },
+    {
+      "type": "shell",
+      "inline_shebang": "/bin/bash",
+      "inline": [
+        "set -e",
+        "set -x",
+        "echo export VYOS_RELEASE={{user `vyos_release`}} > /tmp/vyos-build/scripts/vyos_release.sh",
+        "chmod +x /tmp/vyos-build/scripts/*.sh",
+        "sudo /tmp/vyos-build/scripts/build.sh"
+      ]
+    }
+  ]
+}
