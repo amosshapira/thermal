@@ -1,0 +1,5 @@
+description: 'Setup AWS VPC'
+services:
+  enabled:
+    - 'common'
+create_s3_endpoint: true

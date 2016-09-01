@@ -1,0 +1,121 @@
+# This file describes all VPC's on the WAN but more importantl it describes
+# the connections between them.
+#
+# The name 'vpc' is a bit misleading since it also refers to non-VPC subnets
+# (e.g. an office or a data center outside AWS).
+#
+# Route table maintenance is done automatically using BGP-4.
+#
+# The file also defines the IPSec tunnels between the various locations.
+# For the sake of this document, "VPC" is used to refer to any location.
+#
+# VPC's are configured by a separate CloudFormation stack template than
+# the IPSec tunnels, but both template types read this file to know what
+# to do.
+#
+# The rule is that each VPC can have EITHER incoming OR outgoing
+# connections, NOT BOTH.
+# (the reason is that if it has both then it will setup both
+# a Virtual GW for incoming connections and configure the NAT EC2 for
+# outgoing connections, and both will expect to own the public IP and routes
+# in the VPC).
+#
+# In practice, this means that the easiest topology is to have dedicated
+# "hubs" which only serve as the passive side of the IPSec tunnels using
+# Virtal Gateway and route traffic between the spokes, which initiate the
+# IPSec tunnel connection using VyOS EC2 instances controlled by
+# AutoScalingGroups
+#
+# 'vpcs' array:
+#
+# Defines any location, not just AWS VPC's (e.g. an office, a data center,
+# VPC's configured not using this tool etc)
+# A 'real' AWS VPC is denoted by having a 'region' field, which indicates the
+# AWS region.
+# The 'cidr' field defines the subnet of that VPC and must NOT overlap with
+# other VPC's.
+# The 'bgp_asn' numbers are taken from the 'private' range of 64512-65534
+# (ref: https://tools.ietf.org/html/rfc6996#section-5).
+# Unless it's already defined, pick a unique number from this range and use
+# it here.
+#
+# 'connections' array:
+#
+# Defines the IPSec tunnels between the nodes which are defined in the 'vpcs'
+# array described above.
+# The names directly underneath the 'connections' array are arbitrary and
+# meant to be descriptive.
+# Under these descriptive grouping names, there are two entries: 'to' and 'from'
+#
+# Each VPC appearing under 'to' (i.e. the passive side of the IPSec connection):
+# * Creates a Virtual Gatwaay (aka VGW) and a Customer Gateways (CGW) for
+#   each of the expected incoming connections from the 'from' entries.
+#
+# Each VPC appearing under 'from'
+# * Run up VyOS EC2 instances controlled by AutoScalingGroup which pulls
+#   the IPSec tunnel parameters from the VGW configuration and configures
+#   itself according to it.
+#
+# Each 'connections' entry can define a group of edges with common 'from'
+# and 'to', e.g.:
+#
+# connections:
+#   sydney-hub:
+#     to:
+#       - sydney-hub
+#     from:
+#       - virginia
+#       - ireland
+#       - sydney-office
+#
+# Defines that:
+# * sydney-hub setup a Virtual GW to accept connections and Custom Gateways
+#   for each of virginia, ireland and sydney-office
+# * virginia and ireland configure VyOS EC2 instances to talk to the
+#   VGW in sydney-hub
+# * sydney-office, which is not a VPC, will have to be configured manually to
+#   setup the IPSec tunnels to sydney-hub. It can still use parts of the VyOS
+#   automation script to do that if it runs VyOS.
+#
+# The 'to' array can take multiple entries too, if all the 'from' entries
+# are relevant. e.g. have more "hubs" in other locations.
+#
+# Tip: I use dedicated "hub" VPC's which don't do anything except host the hub.
+#      This means that these "hubs" can have the smallest possible subnet
+#      allocated for them (AWS dictates /28 as the smallest subnet).
+#
+# Tip: Two hubs cannot initiate connections directly to each other. This can
+#      be worked around by creating a VPC which connects to both hubs.
+#
+# Tip: Due to AWS limitations, a Custom Gateway (CGW), identified by its
+#      public IP address, can be configured only once in each region.
+#      This means that only one hub can accept connections from that CGW
+#      in each region.
+
+vpcs:
+  tokyo-hub:
+    # dedicated VPC just for network hub
+    region: ap-northeast-1
+    cidr: 10.255.250.0/28
+    # Notice that we don't set a BGP ASN for this location - it uses
+    # AWS's "7224" ASN
+  tokyo:
+    region: ap-northeast-1
+    cidr: 192.168.240.0/24
+    bgp_asn: 65001
+  singapore:
+    region: ap-southeast-1
+    cidr: 192.168.250.0/24
+    bgp_asn: 65002
+  virginia:
+    region: us-east-1
+    cidr: 192.168.255.0/24
+    bgp_asn: 65003
+connections:
+  to-tokyo-hub:
+    to:
+      - tokyo-hub
+    from:
+      - tokyo
+      - singapore
+      - virginia

@@ -1,0 +1,6 @@
+template_name: wan
+region: ap-northeast-1
+description: 'Tokyo WAN'
+# the VPC that this WAN connects
+vpc: 'tokyo'
+openvpn_server: True

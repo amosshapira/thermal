@@ -1,0 +1,40 @@
+#!/bin/bash
+
+# This script will bring up the example configuration as checked out
+# from the public repository
+
+DIR=$(dirname $0)
+
+# Allocate Elastic IP's, they'll get stored in configuration/eips.vpcs
+$DIR/manage-eips
+
+# Usage: create_stack stack-name region
+create_stack() {
+  $DIR/compile $1 > $1.json && \
+  aws cloudformation create-stack \
+    --debug \
+    --color on \
+    --capabilities CAPABILITY_IAM \
+    --template-body file://$1.json \
+    --stack-name $1 \
+    --region $2 && \
+  aws cloudformation wait stack-create-complete \
+    --debug \
+    --color on \
+    --stack-name $1 \
+    --region $2 \
+
+}
+# Bring up the Hub
+create_stack tokyo-hub ap-northeast-1
+create_stack tokyo-hub-wan ap-northeast-1
+
+# Now the "spokes" have all they need to come up
+create_stack tokyo ap-northeast-1
+create_stack tokyo-wan ap-northeast-1
+create_stack singapore ap-southeast-1
+create_stack singapore-wan ap-southeast-1
+create_stack virginia us-east-1
+create_stack virginia-wan us-east-1
+
+exit 0

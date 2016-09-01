@@ -1,0 +1,5 @@
+# If defined then each NAT server which is configured to be an
+# OpenVPN remote access server will have its name as
+# "stack-name.external_tld".
+# The domain mus be configured in Route53.
+#external_tld: company.com
