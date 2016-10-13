@@ -1,4 +1,4 @@
-# vyos-based-vpc-wan
+# Thermal: VyOS based VPC WAN
 Setup wide-area-network using IPSec tunnels between multiple AWS VPC's
 
 Requirements:
