@@ -12,8 +12,8 @@ Requirements:
 To try the repo:
 
 ```
-$ git clone https://github.com/amosshapira/vyos-based-vpc-wan.git`
-$ cd vyos-based-vpc-wan/vyos-images
+$ git clone https://github.com/amosshapira/thermal.git
+$ cd thermal/vyos-images
 # build AMI's
 $ ./run-packer
 $ cd ../cloudformation
@@ -30,19 +30,19 @@ This should bring up the entire WAN and connect between all VPC's.
 It takes a couple of minutes for each VPN connection to be fully up and routes propagted. Have patience.
 
 When the links are up and the routes come through, the routing table of the private network in the hub will look something like this:
-![](https://github.com/amosshapira/vyos-based-vpc-wan/raw/master/docs/images/route-tables.png)
+![](https://github.com/amosshapira/thermal/raw/master/docs/images/route-tables.png)
 
 You can see that the routes from all remote VPC's are available and were propagted automatically.
 
 When a tunnel is up, you'll see in the VPN Connection "UP" in the hub:
-![](https://github.com/amosshapira/vyos-based-vpc-wan/raw/master/docs/images/tunnels-up.png)
+![](https://github.com/amosshapira/thermal/raw/master/docs/images/tunnels-up.png)
 
 The "Details" column shows the number of routes advertised by that spoke (2 in this case - one for each subnet). And the "Status" of "UP" indicates that the BGP-4 session is fine.
 
 The auto-generated security groups automatically open up full access from each location to the others, to ease troubleshooting. But this means that you won't be able to ssh into the VyOS EC2 instances from your laptop to examine them.
 
 To allow that, you have to edit the security group of one of the VyOS instances and add an SSH rule with "My IP", like this:
-![](https://github.com/amosshapira/vyos-based-vpc-wan/raw/master/docs/images/adding-my-ip-ssh.png)
+![](https://github.com/amosshapira/thermal/raw/master/docs/images/adding-my-ip-ssh.png)
 
 Once this is in place, you can ssh to user "`vyos`" on that elastic IP address using the ssh key you specified.
 
