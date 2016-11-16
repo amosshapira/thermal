@@ -5,7 +5,7 @@
 
 DIR=$(dirname $0)
 
-# Allocate Elastic IP's, they'll get stored in configuration/eips.vpcs
+# Allocate Elastic IP's, they'll get stored in configuration/eips.yaml
 $DIR/manage-eips
 
 # Usage: create_stack stack-name region
