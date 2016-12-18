@@ -1,6 +1,6 @@
 template_name: wan
-region: ap-southeast-1
-description: 'Singapore WAN'
+region: us-east-2
+description: 'Ohio WAN'
 # the VPC that this WAN connects
-vpc: 'singapore'
+vpc: 'ohio'
 openvpn_server: True

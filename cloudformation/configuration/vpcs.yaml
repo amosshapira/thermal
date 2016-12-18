@@ -93,29 +93,29 @@
 #      in each region.
 
 vpcs:
-  tokyo-hub:
+  virginia-hub:
     # dedicated VPC just for network hub
-    region: ap-northeast-1
-    cidr: 10.255.250.0/28
+    region: us-east-1
+    cidr: 192.168.250.0/28
     # Notice that we don't set a BGP ASN for this location - it uses
     # AWS's "7224" ASN
-  tokyo:
-    region: ap-northeast-1
-    cidr: 192.168.240.0/24
-    bgp_asn: 65001
-  singapore:
-    region: ap-southeast-1
-    cidr: 192.168.250.0/24
-    bgp_asn: 65002
   virginia:
     region: us-east-1
-    cidr: 192.168.255.0/24
+    cidr: 192.168.240.0/24
+    bgp_asn: 65001
+  ohio:
+    region: us-east-2
+    cidr: 192.168.230.0/24
+    bgp_asn: 65002
+  oregon:
+    region: us-west-2
+    cidr: 192.168.220.0/24
     bgp_asn: 65003
 connections:
-  to-tokyo-hub:
+  to-virginia-hub:
     to:
-      - tokyo-hub
+      - virginia-hub
     from:
-      - tokyo
-      - singapore
       - virginia
+      - ohio
+      - oregon

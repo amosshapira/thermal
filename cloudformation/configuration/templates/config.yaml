@@ -1,5 +1,12 @@
 # If defined then each NAT server which is configured to be an
 # OpenVPN remote access server will have its name as
 # "stack-name.external_tld".
-# The domain mus be configured in Route53.
+# The domain must be configured in Route53.
 #external_tld: company.com
+# AWS CLI profile to use
+profile: default
+# Name of S3 Bucket to upload the CloudFormation templates to. This
+# allows for larger templates than 51,200 bytes (up to 460,800 bytes)
+# Set it to a bucket you can write to
+# ref: https://goo.gl/7xOy0x
+s3_bucket: thermal-cloudformation-templates

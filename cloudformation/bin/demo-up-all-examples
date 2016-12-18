@@ -3,38 +3,33 @@
 # This script will bring up the example configuration as checked out
 # from the public repository
 
-DIR=$(dirname $0)
+realpath() {
+    [[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"
+}
+
+DIR=$(realpath $(dirname $0))
+
+cd ${DIR}/.. || exit 1
 
 # Allocate Elastic IP's, they'll get stored in configuration/eips.yaml
-$DIR/manage-eips
+./bin/manage-eips || exit 1
 
 # Usage: create_stack stack-name region
 create_stack() {
-  $DIR/compile $1 > $1.json && \
-  aws cloudformation create-stack \
-    --debug \
-    --color on \
-    --capabilities CAPABILITY_IAM \
-    --template-body file://$1.json \
-    --stack-name $1 \
-    --region $2 && \
-  aws cloudformation wait stack-create-complete \
-    --debug \
-    --color on \
-    --stack-name $1 \
-    --region $2 \
-
+  echo Bringing up stack \"$1\"
+  ./bin/manage-cfn up --force --stack "$1" || exit 1
 }
+
 # Bring up the Hub
-create_stack tokyo-hub ap-northeast-1
-create_stack tokyo-hub-wan ap-northeast-1
+create_stack virginia-hub
+create_stack virginia-hub-wan
 
 # Now the "spokes" have all they need to come up
-create_stack tokyo ap-northeast-1
-create_stack tokyo-wan ap-northeast-1
-create_stack singapore ap-southeast-1
-create_stack singapore-wan ap-southeast-1
-create_stack virginia us-east-1
-create_stack virginia-wan us-east-1
+create_stack virginia
+create_stack virginia-wan
+create_stack ohio
+create_stack ohio-wan
+create_stack oregon
+create_stack oregon-wan
 
 exit 0

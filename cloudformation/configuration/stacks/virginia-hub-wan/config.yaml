@@ -1,0 +1,6 @@
+template_name: wan
+region: us-east-1
+description: 'Virginia Hub WAN'
+# the VPC that this WAN connects
+vpc: 'virginia-hub'
+openvpn_server: True

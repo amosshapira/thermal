@@ -3,30 +3,28 @@
 # This script will destroy the example configuration as checked out
 # from the public repository
 
-# Usage: delete_stack stack-name region
-delete_stack() {
-  aws cloudformation delete-stack \
-    --debug \
-    --color on \
-    --stack-name $1 \
-    --region $2 && \
-  aws cloudformation wait stack-delete-complete \
-    --debug \
-    --color on \
-    --stack-name $1 \
-    --region $2 \
-
+realpath() {
+    [[ $1 = /* ]] && echo "$1" || echo "$PWD/${1#./}"
 }
+
+DIR=$(realpath $(dirname $0))
+
+cd ${DIR}/.. || exit 1
+
+delete_stack() {
+  ./bin/manage-cfn down --force --stack "$1" || exit 1
+}
+
 # First delete the the WAN's
-delete_stack tokyo-wan ap-northeast-1
-delete_stack singapore-wan ap-southeast-1
-delete_stack virginia-wan us-east-1
-delete_stack tokyo-hub-wan ap-northeast-1
+delete_stack oregon-wan
+delete_stack ohio-wan
+delete_stack virginia-wan
+delete_stack virginia-hub-wan
 
 # Now can delete the VPC's themselves:
-delete_stack tokyo ap-northeast-1
-delete_stack singapore ap-southeast-1
-delete_stack virginia us-east-1
-delete_stack tokyo-hub ap-northeast-1
+delete_stack oregon
+delete_stack ohio
+delete_stack virginia
+delete_stack virginia-hub
 
 exit 0

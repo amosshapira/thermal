@@ -1,0 +1,10 @@
+template_name: vpc
+region: us-west-2
+description: 'Oregon VPC'
+subnets:
+  - zone: a
+    cidr: '192.168.220.0/25'
+    public: true
+  - zone: a
+    cidr: '192.168.220.128/25'
+    public: false

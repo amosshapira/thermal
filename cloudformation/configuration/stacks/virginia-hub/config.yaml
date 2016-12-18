@@ -1,0 +1,7 @@
+template_name: vpc
+region: us-east-1
+description: 'Virginia Hub'
+subnets:
+  - zone: d
+    cidr: '192.168.250.0/28'
+    public: true

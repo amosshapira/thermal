@@ -1,6 +1,0 @@
-template_name: wan
-region: ap-northeast-1
-description: 'Tokyo Hub WAN'
-# the VPC that this WAN connects
-vpc: 'tokyo-hub'
-openvpn_server: False

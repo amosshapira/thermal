@@ -2,9 +2,9 @@ template_name: vpc
 region: us-east-1
 description: 'Virginia'
 subnets:
-  - zone: a
-    cidr: '192.168.255.0/25'
+  - zone: c
+    cidr: '192.168.240.0/25'
     public: true
-  - zone: a
-    cidr: '192.168.255.128/25'
+  - zone: c
+    cidr: '192.168.240.128/25'
     public: false

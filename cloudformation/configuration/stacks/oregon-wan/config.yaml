@@ -1,6 +1,6 @@
 template_name: wan
-region: ap-northeast-1
-description: 'Tokyo WAN'
+region: us-west-2
+description: 'Oregon WAN'
 # the VPC that this WAN connects
-vpc: 'tokyo'
+vpc: 'oregon'
 openvpn_server: True

@@ -1,0 +1,10 @@
+template_name: vpc
+region: us-east-2
+description: 'Ohio VPC'
+subnets:
+  - zone: a
+    cidr: '192.168.230.0/25'
+    public: true
+  - zone: a
+    cidr: '192.168.230.128/25'
+    public: false

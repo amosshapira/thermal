@@ -1,0 +1,5 @@
+#!/bin/bash
+# extract the AMI id's from the packer.log and print in a YAML-ready format
+awk -F, '$0 ~/artifact,0,id/ {print $6}' packer.log | \
+  gsed -e 's/%!(PACKER_COMMA)/\n/g' | \
+  gsed -e 's/^/    /g' -e 's/:/: /g'

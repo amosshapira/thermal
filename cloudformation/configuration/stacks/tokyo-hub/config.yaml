@@ -1,7 +1,0 @@
-template_name: vpc
-region: ap-northeast-1
-description: 'Tokyo Hub'
-subnets:
-  - zone: a
-    cidr: '10.255.250.0/28'
-    public: true

@@ -84,8 +84,6 @@ chroot /mnt/inst_root insserv ec2-execute-user-data --default
 
 # Install OpenVPN server configuration files and script
 # TODO: manage OpenVPN PKI files better
-cp -a ${SCRIPTS}/config-auth /mnt/inst_root/usr/local/etc/openvpn-auth-ldap
-chroot /mnt/inst_root /bin/chgrp -R vyattacfg /usr/local/etc/openvpn-auth-ldap
 cp ${SCRIPTS}/configure-openvpn-server /mnt/inst_root/usr/local/bin/configure-openvpn-server
 
 echo 'tmpfs /var/run tmpfs nosuid,nodev 0 0' > /mnt/inst_root/etc/fstab

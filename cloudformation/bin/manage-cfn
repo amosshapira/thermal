@@ -1,0 +1,750 @@
+#!/usr/bin/env python
+
+"""Usage:
+manage-cfn up --stack stack [--tail] [--debug] [--force] [--color]
+manage-cfn provision --stack stack [--tail] [--debug] [--force] [--color]
+manage-cfn diff --stack stack [--debug]
+manage-cfn down --stack stack [--tail] [--debug] [--force] [--no-color]
+manage-cfn show --stack stack [--debug]
+manage-cfn status --stack stack [--debug]
+manage-cfn tail --stack stack [--debug] [--color]
+manage-cfn verify --stack stack [--debug] [--color]
+manage-cfn print [--stack stack] [--yaml | --json | --raw] [KEY...]
+manage-cfn list [--debug]
+
+Arguments:
+  KEY                       optional one or more keys to print
+
+Options:
+  -h --help                 Show this help text
+  --color                   Force color output (default if console output)
+  -d --debug                Turn on debug logging
+  -f --force                Skip prompting for confirmation
+                              (default if no console input)
+  -j --json                 Print in JSON format (default)
+  -r --raw                  Print raw strings
+  -s stack --stack=stack    Stack to operate on
+  --tail                    Force tail stack events (default if console output)
+  -y --yaml                 Print in YAML format
+"""
+
+from __future__ import print_function
+import boto
+import boto.cloudformation
+import botocore.exceptions
+import boto3
+import sys
+import os
+import os.path
+import json
+import yaml
+import pprint
+import time
+import logging
+import docopt
+import importlib
+import subprocess
+import getpass
+import time
+import termcolor
+import troposphere
+import signal
+import tabulate
+import collections
+import filecmp
+
+# The 'sys.path.append...' must come before `import templates`
+sys.path.append(os.path.dirname(os.path.realpath(__file__ + "/..")))
+import templates
+
+CAPABILITIES=['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM']
+
+region = 'ap-southeast-2'  # default AWS region
+color = 'green'
+logger = None
+color_output = True
+
+def print_err(message):
+    sys.stderr.write(message)
+
+
+def colored(message, color):
+    if color_output:
+        print(termcolor.colored(message, color))
+    else:
+        print(message)
+
+
+def setup_logging(arguments):
+    global logger
+
+    logging.basicConfig()
+    logger = logging.getLogger('manage-cfn')
+    if arguments['--debug']:
+        logger.setLevel(logging.DEBUG)
+
+
+def unbuffer_output():
+    sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
+    sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', 0)
+
+
+def signal_handler(signal, frame):
+    print_err('Ctrl-C pressed. Quiting.\n')
+    sys.exit(1)
+
+
+def prompt_and_exit_if_no_confirm(arguments):
+    if arguments['--force']:
+        logger.debug('prompt: --force supplied, not prompting')
+        return
+
+    if not os.isatty(sys.stdin.fileno()):
+        logger.warning('prompt: input is not a TTY, not prompting')
+        return
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    response = raw_input('\nPress ENTER to continue, "no" or ^C to quit... ')
+
+    if response.lower() not in ('', 'yes', 'y'):
+        print_err('Response: \"%(response)s\". QUITING\n' % locals())
+        sys.exit(1)
+
+    print_err('Action approved.\n')
+
+
+def delete_prompt_and_exit_if_no_confirm(arguments):
+    if arguments['--force']:
+        logger.debug('prompt: --force supplied, not prompting')
+        return
+
+    if not os.isatty(sys.stdin.fileno()):
+        logger.warning('prompt: input is not a TTY, not prompting')
+        return
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    response = raw_input('\nType "yes" to continue, anything else or ^C to quit: ')
+
+    if response.lower() != 'yes':
+        print_err('Response: \"%(response)s\". QUITING\n' % locals())
+        sys.exit(1)
+
+    print_err('Action approved.\n')
+
+
+def list_stack_events(stack, last_event_described = None):
+    global color
+
+    stack_name = stack.name
+
+    events = list(stack.events.all())
+
+    if last_event_described:
+        last_event_described_index = next((i for i, event in enumerate(events)
+            if event.event_id == last_event_described), -1)
+        if last_event_described_index != -1:
+            logger.debug('list_stack_events: %s: slicing events from %d to %d' %
+                (stack_name, len(events), last_event_described_index))
+            events = events[:last_event_described_index]
+
+    logger.debug('--- %s: %d new events: ---' % (stack_name, len(events)))
+
+    for event in reversed(events):
+        # 'green' until first failure
+        if color == 'green' and event.resource_status.endswith('_FAILED'):
+            # 'red' for first failure
+            color = 'red'
+        # 'magenta' for subsequent events after first failure
+        elif color == 'red':
+            color = 'magenta'
+
+        colored('%s %s %20s %20s %20s %12s %s' % (
+                stack_name,
+                event.timestamp.strftime('%H:%M:%S'),
+                event.resource_status,
+                event.resource_type,
+                event.logical_resource_id,
+                event.event_id,
+                event.resource_status_reason or ''
+            ),
+            color)
+
+        if event.physical_resource_id and len(event.physical_resource_id):
+            colored(' '*(len(stack_name)+8) + 'Physical ID: %s' % event.physical_resource_id, color)
+
+    if events:
+        last_event_described = events[0].event_id
+        logger.debug('list_stack_events: %(stack_name)s: last_event_described: '
+            '%(last_event_described)s' % locals())
+
+    return last_event_described
+
+
+def get_last_stack_event_id(stack):
+    event = list(stack.events.all())[0]
+
+    return event.id if event else None
+
+
+def wait_for_update_to_complete(stack, last_stack_event_id):
+
+    try:
+        while True:
+            if stack:
+                stack.reload()
+                last_stack_event_id = list_stack_events(stack,
+                    last_stack_event_id)
+                logger.debug('wait_for_update_to_complete: stack_status: "%s"' %
+                    stack.stack_status)
+                if not stack.stack_status.endswith('_IN_PROGRESS'):
+                    break
+            else:
+                break
+            time.sleep(5)
+    except botocore.exceptions.ClientError as ex:
+        logger.debug('wait_for_update_to_complete: exception')
+        logger.debug('wait_for_update_to_complete: vars(ex): %s' %
+            pprint.pformat(vars(ex)))
+        logger.debug('wait_for_update_to_complete: dir(ex): %s' %
+            pprint.pformat(dir(ex)))
+
+
+    if stack:
+        status = stack.stack_status
+    else:
+        status = None
+
+    logger.info('wait_for_update_to_complete: %s: status: %s; done' %
+                (stack.name, status))
+
+    return status
+
+
+def exit_if_stack_cant_be_updated(stack):
+    if stack and stack.stack_status.endswith('_FAILED'):
+        sys.exit('%s: in failed status %s, YOU MUST DELETE THE STACK.  ABORTING.' %
+                 (stack.stack_name, stack.stack_status))
+
+
+def print_config(arguments):
+    config = templates.config(arguments['--stack'])
+
+    if arguments['KEY']:
+        print_keys(config, arguments)
+    else:
+        print(format_output(config, arguments))
+
+
+def format_output(o, arguments):
+    if arguments['--raw']:
+        return o
+    elif arguments['--yaml']:
+        return yaml.dump(o, default_flow_style=False)
+    else:
+        return json.dumps(o, sort_keys=True, indent=2, separators=(',', ': '))
+
+
+def print_keys(config, arguments):
+    for key in arguments['KEY']:
+        local_config = config
+        segments = key.split('.')
+        segment_path = ''
+        for segment in segments[:-1]:
+            # print "segment: \"%(segment)s\"" % locals()
+            segment_path = '.'.join((segment_path, segment))
+            if segment in local_config:
+                if isinstance(local_config[segment], dict):
+                    local_config = local_config[segment]
+                else:
+                    print_err("\"%(segment_path)s\": not a "
+                        "dictionary and not last" % locals())
+                    sys.exit(1)
+            else:
+                print_err("\"%(segment_path)s\": not found" %
+                    locals())
+                sys.exit(1)
+        else:
+            segment = segments[-1]
+            if segment in local_config:
+                print(format_output(local_config[segment], arguments))
+            else:
+                print_err("\"%(key)s\": not found" % locals())
+                sys.exit(1)
+
+
+def render(config, arguments):
+    cfn_template = troposphere.Template()
+    cfn_template.add_description(config['description'])
+    cfn_template.add_version("2010-09-09")
+
+    template_name = "templates.%s" % config['template_name']
+
+    importlib.import_module(template_name)
+
+    for service in config['services']['enabled']:
+        module = importlib.import_module(template_name + "." + service)
+        module.run(config, cfn_template)
+
+    stack_name = arguments['--stack']
+
+    if not os.path.exists('tmp'):
+        os.makedirs('tmp')
+
+    filename = 'tmp/%(stack_name)s-next.json' % locals()
+    content = cfn_template.to_json(sort_keys=True, indent=2,
+        separators=(',', ': '))
+
+    if content.endswith('\n\n'):
+        content = content[:-1]
+
+    with open(filename, 'w') as f:
+        print(content, file=f)
+
+    return (content, filename)
+
+
+def get_current_template(stack_name, config):
+    region = config['region']
+    profile = config['profile']
+
+    session = boto3.session.Session(region_name=region, profile_name=profile)
+    client = session.client('cloudformation')
+    template = client.get_template(StackName = stack_name)
+
+    filename = 'tmp/%(stack_name)s-current.json' % locals()
+    content = json.dumps(template['TemplateBody'], sort_keys=True, indent=2,
+        separators=(',', ': '))
+
+    with open(filename, 'w') as f:
+        print(content, file=f)
+
+    return (content, filename)
+
+
+def diff(old_template, old_file, new_template, new_file):
+    longest_line = len(max(old_template.splitlines() +
+        new_template.splitlines(), key=len)) * 2 + 10
+
+    columns = int(os.popen('stty size', 'r').read().split()[1])
+
+    width = min(columns, longest_line)
+
+    subprocess.call('diff -w -W "%(width)d" -b '
+        '--side-by-side "%(old_file)s" "%(new_file)s" | less -N' % locals(),
+        shell=True)
+
+
+def diff_stack(arguments):
+    stack_name = arguments['--stack']
+    config = templates.config(stack_name)
+    (old_template, old_file) = get_current_template(stack_name, config)
+    (new_template, new_file) = render(config, arguments)
+
+    diff(old_template, old_file, new_template, new_file)
+
+
+def upload_template(config, filename):
+    stack_name = config['stack']
+    bucket_name = config['s3_bucket']
+    region = config['region']
+    profile = config['profile']
+
+    user = getpass.getuser()
+    timestamp = time.strftime('%Y-%m-%d-%H:%M:%S', time.gmtime())
+    key = 'infrastructure/%(stack_name)s-%(user)s-%(timestamp)s.json' % locals()
+
+    session = boto3.session.Session(region_name=region, profile_name=profile)
+    s3 = session.resource('s3')
+    with open(filename, 'rb') as data:
+        s3.Bucket(bucket_name).put_object(Key=key, Body=data)
+
+    url = "https://s3.amazonaws.com/%(bucket_name)s/%(key)s" % locals()
+
+    return url
+
+
+def tail(region, profile, stack_name, last_stack_event_id, arguments):
+
+    if not arguments['--tail'] and not os.isatty(sys.stdout.fileno()):
+        return 0
+
+    session = boto3.session.Session(region_name=region, profile_name=profile)
+    cfn = session.resource('cloudformation')
+    stack = cfn.Stack(stack_name)
+
+    try:
+        if stack and stack.stack_status:
+            logger.info('tail: %s: status: "%s"' % (stack_name, stack.stack_status))
+        else:
+            logger.info('tail: %(stack_name)s: stack or stack.stack_status not set'
+                % locals())
+    except botocore.exceptions.ClientError as ex:
+        logger.debug('tail: exception')
+        if ex.message.endswith('Stack with id %(stack_name)s does not exist' %
+            locals()):
+            print('%(stack_name)s: does not exist' % locals())
+        else:
+            print_err('status: stack %(stack_name)s: another exception: '
+                '%(ex)s' % locals())
+        return 1
+
+    exit_if_stack_cant_be_updated(stack)
+
+    last_stack_event_id = get_last_stack_event_id(stack) if stack else None
+
+    complete = True
+
+    status = wait_for_update_to_complete(stack, last_stack_event_id)
+    if status == None:
+        logger.info('tail: %(stack_name)s: no status' % locals())
+    elif not status.endswith('_COMPLETE'):
+        logger.error('tail: %(stack_name)s: status not complete: %(status)s'
+            % locals())
+        complete = False
+    else:
+        logger.info('tail: %(stack_name)s: status is complete: %(status)s'
+            % locals())
+
+    return 0 if complete else 1
+
+
+def status(region, profile, stack_name):
+
+    session = boto3.session.Session(region_name=region, profile_name=profile)
+    cfn = session.resource('cloudformation')
+    stack = cfn.Stack(stack_name)
+
+    try:
+        if stack and stack.stack_status:
+            stack_status = stack.stack_status
+            print('%(stack_name)s: state: up; status: %(stack_status)s' %
+                locals())
+        else:
+            print('%(stack_name)s: state: down' % locals())
+    except botocore.exceptions.ClientError as ex:
+        logger.debug('status: exception')
+        if ex.message.endswith('Stack with id %(stack_name)s does not exist' %
+            locals()):
+            print('%(stack_name)s: state: down' % locals())
+        else:
+            logger.error('status: stack %(stack_name)s: another exception: '
+                '%(ex)s' % locals())
+
+
+def provision_stack(arguments):
+    stack_name = arguments['--stack']
+    config = templates.config(stack_name)
+    region = config['region']
+    profile = config['profile']
+
+    try:
+        (old_template, old_file) = get_current_template(stack_name, config)
+    except botocore.exceptions.ClientError as ex:
+        if ex.message.endswith('Stack with id %(stack_name)s does not exist' %
+            locals()):
+            logger.warning('provision_stack: stack %(stack_name)s does not '
+                'exist' % locals())
+        else:
+            logger.error('provision_stack: stack %(stack_name)s: '
+                'another exception: %(ex)s' % locals())
+        return 1
+
+    (new_template, new_file) = render(config, arguments)
+
+    if not arguments['--force'] and filecmp.cmp(old_file, new_file,
+      shallow = False):
+        logger.warning('provision_stack: stack %(stack_name)s: '
+            'no changes to commit' % locals())
+        return 0
+
+    if not arguments['--force']:
+        diff(old_template, old_file, new_template, new_file)
+
+    prompt_and_exit_if_no_confirm(arguments)
+
+    template_url = upload_template(config, new_file)
+    session = boto3.session.Session(region_name=region, profile_name=profile)
+    cfn = session.resource('cloudformation')
+    stack = cfn.Stack(stack_name)
+
+    last_stack_event_id = get_last_stack_event_id(stack) if stack else None
+
+    try:
+        stack.update(
+            TemplateURL=template_url,
+            Capabilities=CAPABILITIES,
+        )
+    except botocore.exceptions.ClientError as ex:
+        logger.error('provision_stack: stack %(stack_name)s: error: %(ex)s'
+            % locals())
+        return 1
+
+    return tail(region, profile, stack_name, last_stack_event_id, arguments)
+
+
+def up_stack(arguments):
+    stack_name = arguments['--stack']
+    config = templates.config(stack_name)
+    region = config['region']
+    profile = config['profile']
+
+    (new_template, new_file) = render(config, arguments)
+
+    if not arguments['--force']:
+        subprocess.call('less -N "%(new_file)s"' % locals(), shell=True)
+
+    prompt_and_exit_if_no_confirm(arguments)
+
+    template_url = upload_template(config, new_file)
+    session = boto3.session.Session(region_name=region, profile_name=profile)
+    cfn = session.resource('cloudformation')
+    stack = cfn.Stack(stack_name)
+
+    try:
+        cfn.create_stack(
+            StackName = stack_name,
+            TemplateURL = template_url,
+            Capabilities = CAPABILITIES,
+        )
+    except botocore.exceptions.ClientError as ex:
+        logger.debug('up_stack: exception')
+        if ex.message.endswith(' Stack [%(stack_name)s] already exists' %
+            locals()):
+            logger.warning('up_stack: stack "%(stack_name)s" already exists' %
+                locals())
+        else:
+            logger.error('up_stack: stack "%(stack_name)s": another exception: '
+                '%(ex)s' % locals())
+        return 1
+
+    return tail(region, profile, stack_name, None, arguments)
+
+
+def down_stack(arguments):
+    global logger
+
+    stack_name = arguments['--stack']
+    config = templates.config(stack_name)
+    region = config['region']
+    profile = config['profile']
+
+    session = boto3.session.Session(region_name=region, profile_name=profile)
+    cfn = session.resource('cloudformation')
+    stack = cfn.Stack(stack_name)
+
+    try:
+        if stack and stack.stack_status:
+            logger.info('down_stack: %s: status: "%s"' %
+                (stack_name, stack.stack_status))
+        else:
+            logger.info('down_stack: %(stack_name)s: '
+                'stack or stack.stack_status not set' % locals())
+            return
+    except botocore.exceptions.ClientError as ex:
+        logger.debug('down_stack: exception')
+        if ex.message.endswith('Stack with id %(stack_name)s does not exist' %
+            locals()):
+            logger.warning('down_stack: stack %(stack_name)s does not exist' %
+                locals())
+        else:
+            logger.debug('down_stack: stack %(stack_name)s: another exception: '
+                '%(ex)s' % locals())
+        return
+
+
+    print('\n\nWARNING!  ABOUT TO DELETE STACK %(stack_name)s\n' % locals())
+    delete_prompt_and_exit_if_no_confirm(arguments)
+
+    last_stack_event_id = get_last_stack_event_id(stack) if stack else None
+
+    stack.delete()
+
+    tail(region, profile, stack_name, last_stack_event_id, arguments)
+
+
+def show_stack(arguments):
+    stack_name = arguments['--stack']
+    config = templates.config(stack_name)
+
+    (new_template, new_file) = render(config, arguments)
+
+    subprocess.call('less -N "%(new_file)s"' % locals(), shell=True)
+
+
+def tail_stack(arguments):
+    stack_name = arguments['--stack']
+    config = templates.config(stack_name)
+    region = config['region']
+    profile = config['profile']
+
+    # Force tail
+    arguments['--tail'] = True
+
+    tail(region, profile, stack_name, None, arguments)
+
+
+def status_stack(arguments):
+    stack_name = arguments['--stack']
+    config = templates.config(stack_name)
+    region = config['region']
+    profile = config['profile']
+
+    status(region, profile, stack_name)
+
+
+def validate_stack(arguments):
+    stack_name = arguments['--stack']
+    config = templates.config(stack_name)
+    region = config['region']
+    profile = config['profile']
+
+    (new_template, new_file) = render(config, arguments)
+
+    subprocess.call('less -N "%(new_file)s"' % locals(), shell=True)
+
+    template_url = upload_template(config, new_file)
+    session = boto3.session.Session(region_name=region, profile_name=profile)
+    client = session.client('cloudformation')
+
+    try:
+        client.validate_template(
+            TemplateURL = template_url
+        )
+    except botocore.exceptions.ClientError as ex:
+        logger.error('validate_stack: stack "%(stack_name)s": exception: '
+                '%(ex)s' % locals())
+        return 1
+
+    print('validate_stack: "%(stack_name)s": success' % locals())
+
+
+def optional_format_time(time):
+    return time.strftime('%Y-%m-%d %H:%M:%S') if time else None
+
+
+def list_stacks(arguments):
+    stacks = [d for d in os.listdir('configuration/stacks') if
+        os.path.isfile(os.path.join('configuration/stacks', d, 'config.yaml'))]
+
+    logger.debug("stacks: %(stacks)s" % locals())
+
+    stack_states = [collections.OrderedDict([
+        ('name', 'Name'),
+        ('profile', 'Profile'),
+        ('region', 'Region'),
+        ('state', 'State'),
+        ('status', 'Status'),
+        ('creation_time', 'Created'),
+        ('last_updated', 'Last Updated'),
+        ('description', 'Description'),
+    ])]
+
+    isatty = os.isatty(sys.stdout.fileno())
+
+    if isatty:
+        print('%d stacks: ' % len(stacks), end='')
+
+    for stack_name in stacks:
+        if isatty:
+            print('.', end='')
+
+        config = templates.config(stack_name)
+        region = config['region']
+        profile = config['profile']
+
+        try:
+            session = boto3.session.Session(region_name=region, profile_name=profile)
+        except botocore.exceptions.ProfileNotFound:
+            logger.info('list_stacks: %(stack_name)s: '
+                'profile "%(profile)s" not found, skipping' % locals())
+            continue
+
+        cfn = session.resource('cloudformation')
+        stack = cfn.Stack(stack_name)
+
+        try:
+            if stack and stack.stack_status:
+                stack_status = stack.stack_status
+                logger.debug('list_stacks: %(stack_name)s: state: up; status: %(stack_status)s' %
+                    locals())
+                stack_states.append(collections.OrderedDict([
+                    ('name', stack_name),
+                    ('profile', profile),
+                    ('region', region),
+                    ('state', 'up'),
+                    ('status', stack_status),
+                    ('creation_time', optional_format_time(stack.creation_time)),
+                    ('last_updated',
+                        optional_format_time(stack.last_updated_time)),
+                    ('description', stack.description),
+                ]))
+            else:
+                logger.error('list_stacks: %(stack_name)s: state: down but now exception!' % locals())
+                assert stack_name
+
+        except botocore.exceptions.ClientError as ex:
+            logger.debug('list_stacks: "%(stack_name)s": exception' % locals())
+            if ex.message.endswith('Stack with id %(stack_name)s does not exist' %
+                locals()):
+                logger.debug('list_stacks: %(stack_name)s: state: down, '
+                    'exception' % locals())
+            else:
+                logger.error('list_stacks: %(stack_name)s: another exception: '
+                    '%(ex)s' % locals())
+
+            stack_states.append(collections.OrderedDict([
+                ('name', stack_name),
+                ('profile', profile),
+                ('region', region),
+                ('state', 'down'),
+                ('description', config['description']),
+            ]))
+
+    if isatty:
+        print('\n')
+
+    logger.debug('list_stacks: stack_states: "%s"' % pprint.pformat(stack_states))
+
+    print(tabulate.tabulate(stack_states, headers="firstrow"))
+
+
+def main():
+    global color_output
+
+    os.chdir(os.path.join(os.path.dirname(__file__), '..'))
+
+    arguments = docopt.docopt(__doc__)
+
+    setup_logging(arguments)
+
+    unbuffer_output()
+
+    color_output = (arguments['--color'] or os.isatty(sys.stdout.fileno()))
+
+    if arguments['up']:
+        status = up_stack(arguments)
+    elif arguments['provision']:
+        status = provision_stack(arguments)
+    elif arguments['diff']:
+        status = diff_stack(arguments)
+    elif arguments['down']:
+        status = down_stack(arguments)
+    elif arguments['show']:
+        status = show_stack(arguments)
+    elif arguments['status']:
+        status = status_stack(arguments)
+    elif arguments['tail']:
+        status = tail_stack(arguments)
+    elif arguments['verify']:
+        status = validate_stack(arguments)
+    elif arguments['print']:
+        status = print_config(arguments)
+    elif arguments['list']:
+        status = list_stacks(arguments)
+
+    sys.exit(status)
+
+if __name__ == "__main__":
+    main()

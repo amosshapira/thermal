@@ -6,19 +6,16 @@ services:
 nat:
   ami_id:
     # VyOS AMI's. Created using Packer from vyos-images
-    ap-northeast-1: ami-e35a9482
-    ap-southeast-1: ami-14ff2477
-    ap-southeast-2: ami-a12d1ac2
-    eu-central-1: ami-cdce3fa2
-    eu-west-1: ami-b3f387c0
-    us-east-1: ami-0186e216
-    us-west-1: ami-dd6123bd
-    us-west-2: ami-ee01d48e
+    us-east-1: ami-57717d40
+    us-east-2: ami-f3a7fd96
+    us-west-2: ami-af4ee4cf
   # The ssh key must be available in all relevant regions
   key_name: 'ssh-key-name'
   # m3.medium is the cheapest EC2 instance type with "moderate"
-  # network petformance (http://www.ec2instances.info/)
-  instance_type: m3.medium
+  # network petformance (http://www.ec2instances.info/), but it's
+  # not available in all regions so I picked a cheaper instance just for
+  # demonstration
+  instance_type: t2.small
   sg_egress_rules:
     # allow access to anywhere outside
     - protocol: '-1' # Any
