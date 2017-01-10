@@ -85,7 +85,7 @@ Options:
 When the links are up and the routes come through, the routing table of the private network in the hub will look something like this:
 ![](https://github.com/amosshapira/thermal/raw/master/docs/images/route-tables.png)
 
-You can see that the routes from all remote VPC's are available and were propagated automatically.
+You can see that the routes from all remote VPC's are available and were propagated automatically (the "Yes" value under the "Propagated" column).
 
 When a tunnel is up, you'll see in the VPN Connection "UP" in the hub:
 ![](https://github.com/amosshapira/thermal/raw/master/docs/images/tunnels-up.png)
