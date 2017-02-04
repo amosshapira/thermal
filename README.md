@@ -8,17 +8,27 @@ Requirements:
 3. Python packages:
   1. [boto](https://github.com/boto/boto) - for now we use Boto 2, not 3.
   2. [Troposphere](https://github.com/cloudtools/troposphere) - to build CloudFormation stacks with Python
+4. Existing AWS account:
+  1. VPC in `us-east-1` to run the AMI building in (if you want to try this code as-is)
+  2. Configured API credentials under your `~/.aws`
 
 To try the repo:
 
 ```
 $ git clone https://github.com/amosshapira/thermal.git
 $ cd thermal/vyos-images
+
+# Pick a VPC and subnet in us-east-1 (Virginia) to execute the AMI building
+# The instance will come up with a public network interface, so the subnet has to
+# support this.
 # build AMI's
-$ ./run-packer
+$ VPC_ID=vpc-XXXXXXXX SUBNET_ID=subnet-YYYYYYYY ./run-packer
+
+# Note the last lines of the output, they contain the AMI id's for the next step
 $ cd ../cloudformation
 $ vim configuration/templates/wan/config.yaml
-# edit to update the AMI's ID's as printed by Packer.
+
+# edit to update the AMI's ID's from the output of "run-packer".
 # also add your ssh key name to "key_name"
 ```
 Now bring up the entire setup:

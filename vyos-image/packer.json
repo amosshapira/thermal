@@ -1,6 +1,8 @@
 {
   "variables": {
-    "vyos_release": "1.1.7"
+    "vyos_release": "1.1.7",
+    "subnet_id": "{{env `SUBNET_ID`}}",
+    "vpc_id": "{{env `VPC_ID`}}"
   },
   "builders": [{
     "type": "amazon-ebs",
