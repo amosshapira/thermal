@@ -1,2 +1,16 @@
 #!/bin/bash
-packer build -debug -machine-readable packer.json
+if [ -z "$VPC_ID" ]
+then
+  echo VPC_ID is missing >&2
+  exit 1
+fi
+
+if [ -z "$SUBNET_ID" ]
+then
+  echo SUBNET_ID is missing >&2
+  exit 1
+fi
+
+export VPC_ID SUBNET_ID
+packer build -debug -machine-readable packer.json | tee packer.log
+./extract-ami-ids
