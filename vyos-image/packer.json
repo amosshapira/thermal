@@ -1,15 +1,24 @@
 {
   "variables": {
-    "vyos_release": "1.1.7",
+    "vyos_release": "1.2.0",
     "subnet_id": "{{env `SUBNET_ID`}}",
-    "vpc_id": "{{env `VPC_ID`}}"
+    "vpc_id": "{{env `VPC_ID`}}",
+    "iso_file": "vyos-999.201702022137-amd64.iso",
+    "iso_url": ".",
+    "iso_checksum_type": "sha256",
+    "iso_checksum": "e23ff60c925cff48e8bdb67d17d20889f5053bb1e2d3de5037405de6fc15613d",
+    "disk_size": "8192",
+    "ssh_timeout": "12m",
+    "memory": "2048",
+    "cpus": "4"
   },
   "builders": [{
     "type": "amazon-ebs",
-    "region": "us-east-1",
-    "source_ami": "ami-72343365",
+    "region": "ap-southeast-2",
+    "source_ami": "ami-47f1c524",
     "subnet_id": "{{user `subnet_id`}}",
     "vpc_id": "{{user `vpc_id`}}",
+    "ssh_timeout": "12m",
     "associate_public_ip_address": true,
     "instance_type": "t2.nano",
     "ssh_username": "ubuntu",
@@ -42,18 +51,76 @@
         "virtual_name": "ephemeral0"
       }
     ]
+  },
+  {
+    "type": "virtualbox-iso",
+    "guest_os_type": "Debian_64",
+    "iso_url": "{{user `iso_url`}}/{{user `iso_file`}}",
+    "iso_checksum": "{{user `iso_checksum`}}",
+    "iso_checksum_type": "{{user `iso_checksum_type`}}",
+    "output_directory": "output-vyos-1.2-amd64-{{build_type}}",
+    "vm_name": "packer-vyos-1.2-amd64",
+    "disk_size": "{{user `disk_size`}}",
+    "headless": "{{user `headless`}}",
+    "boot_wait": "5s",
+    "boot_command": [
+      "<enter><wait10><wait10><wait10><wait10><wait10><wait10>",
+      "vyos<enter><wait>",
+      "vyos<enter><wait>",
+      "install image<enter><wait5>",
+      "Yes<enter><wait5>",
+      "Auto<enter><wait5>",
+      "sda<enter><wait5>",
+      "Yes<enter><wait5>",
+      "<enter><wait10>",
+      "<enter><wait10>",
+      "/config/config.boot<enter><wait10>",
+      "vagrant<enter><wait5>",
+      "vagrant<enter><wait5>",
+      "sda<enter><wait5>",
+      "reboot<enter><wait5>",
+      "Yes<enter><wait10><wait10><wait10><wait10><wait10><wait10>",
+      "vyos<enter><wait5>",
+      "vagrant<enter><wait5>",
+      "configure<enter><wait5>",
+      "set interfaces ethernet eth0 address dhcp<enter><wait>",
+      "set system login user vagrant authentication plaintext-password vagrant<enter><wait>",
+      "set system login user vagrant level admin<enter><wait>",
+      "set service ssh<enter><wait>",
+      "commit<enter><wait5>",
+      "save<enter><wait>",
+      "exit<enter><wait>",
+      "exit<enter><wait5>",
+      "vagrant<enter><wait>",
+      "vagrant<enter><wait>",
+      "configure<enter><wait>",
+      "delete system login user vyos<enter><wait>",
+      "commit<enter><wait5>",
+      "save<enter><wait>",
+      "exit<enter><wait>"
+    ],
+    "ssh_timeout": "{{user `ssh_timeout`}}",
+    "ssh_username": "vagrant",
+    "ssh_password": "vagrant",
+    "shutdown_command": "sudo poweroff",
+    "vboxmanage": [
+      ["modifyvm", "{{.Name}}", "--memory", "{{user `memory`}}"],
+      ["modifyvm", "{{.Name}}", "--cpus", "{{user `cpus`}}"]
+    ]
   }],
   "provisioners": [
     {
       "type": "shell",
       "inline": [
         "mkdir -p /tmp/vyos-build"
-      ]
+      ],
+      "only": ["amazon-ebs"]
     },
     {
       "type": "file",
       "source": "./scripts",
-      "destination": "/tmp/vyos-build"
+      "destination": "/tmp/vyos-build",
+      "only": ["amazon-ebs"]
     },
     {
       "type": "shell",
@@ -61,10 +128,18 @@
       "inline": [
         "set -e",
         "set -x",
-        "echo export VYOS_RELEASE={{user `vyos_release`}} > /tmp/vyos-build/scripts/vyos_release.sh",
+        "echo export VYOS_RELEASE={{user `vyos_release`}} > /tmp/vyos-build/scripts/vars.sh",
+        "echo export ISO_FILE={{user `iso_file`}} >> /tmp/vyos-build/scripts/vars.sh",
         "chmod +x /tmp/vyos-build/scripts/*.sh",
         "sudo /tmp/vyos-build/scripts/build.sh"
-      ]
+      ],
+      "only": ["amazon-ebs"]
+    }
+  ],
+  "post-processors": [
+    {
+      "type": "vagrant",
+      "only": ["virtualbox-iso"]
     }
   ]
 }

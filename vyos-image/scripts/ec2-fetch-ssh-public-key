@@ -1,33 +1,23 @@
 #!/bin/bash
-### BEGIN INIT INFO
-# Provides:          ec2-fetch-ssh-public-key
-# Required-Start:    vyatta-router
-# Required-Stop:
-# Default-Start:     2 3 4 5
-# Default-Stop:
-# Short-Description: AWS EC2 instance init script to fetch and load ssh public key
-# Description:       Retrieve user's public ssh key from EC2 instance metadata
-#                    and load/set the key in config.boot
-### END INIT INFO
 
-# Author: hydrajump <wave@hydrajump.com>
-#
-# Based on http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/building-shared-amis.html#public-amis-install-credentials
-#          https://github.com/andsens/bootstrap-vz/blob/master/providers/ec2/assets/init.d/ec2-get-credentials
+set -x
 
-. /lib/lsb/init-functions
+# Silence Perl warnings about locale
+export LANG=C
 
 # Are we running on AWS?
-/opt/vyatta/sbin/ec2-check.pl
-if [ $? != 0 ]; then
-      exit 0
+if ! /opt/vyatta/sbin/ec2-check.pl; then
+    echo $(basename $0): Not on EC2, exiting
+    exit 0
 fi
 
 # Hack for config permissions stuff
 if [ $(groups | awk '{print $1}') != 'vyattacfg' ]; then
-   sg vyattacfg $0
-   exit
+   exec sg vyattacfg $0
+   exit 1
 fi
+
+source /lib/lsb/init-functions
 
 : ${vyatta_env:=/etc/default/vyatta}
 source $vyatta_env

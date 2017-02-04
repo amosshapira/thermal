@@ -12,5 +12,9 @@ then
 fi
 
 export VPC_ID SUBNET_ID
-packer build -debug -machine-readable packer.json | tee packer.log
+#packer build -debug -machine-readable packer.json | tee packer.log
+#packer build -debug -machine-readable packer.json
+#packer build -debug -machine-readable -only virtualbox-iso packer.json
+packer build -debug -machine-readable -color -only amazon-ebs packer.json | tee packer.log
+#packer build -debug -only virtualbox-iso packer.json
 ./extract-ami-ids
