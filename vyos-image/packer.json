@@ -15,7 +15,7 @@
   "builders": [{
     "type": "amazon-ebs",
     "region": "ap-southeast-2",
-    "source_ami": "ami-47f1c524",
+    "source_ami": "ami-943d3bf7",
     "subnet_id": "{{user `subnet_id`}}",
     "vpc_id": "{{user `vpc_id`}}",
     "ssh_timeout": "12m",
@@ -25,7 +25,6 @@
     "ssh_port": 122,
     "ssh_timeout": "12m",
     "ami_name": "VyOS-{{user `vyos_release`}} {{timestamp}}",
-    "ami_regions": [ "us-east-2", "us-west-2", "us-east-1" ],
     "user_data_file": "./files/aws-user-data.sh",
     "launch_block_device_mappings": [
       {

@@ -19,10 +19,16 @@ parted --script --align optimal /dev/xvda mkpart primary 0% 100%
 mkfs.ext4 -L cloudimg-rootfs /dev/xvda1
 parted --script /dev/xvda set 1 boot
 
+apt-get update
+apt-get install -y curl
+apt-get install -y unionfs-fuse
+
 # install VyOS from ISO
 #curl -o /tmp/vyos.iso -L http://mirror.vyos.net/iso/release/${VYOS_RELEASE}/vyos-${VYOS_RELEASE}-amd64.iso
 # This one seems to be faster Australian mirror
-curl -f -o /tmp/vyos.iso -L http://dev.packages.vyos.net/iso/current/amd64/${ISO_FILE}
+#curl -f -o /tmp/vyos.iso -L http://dev.packages.vyos.net/iso/current/amd64/${ISO_FILE}
+# Temporary copy on my own local S3 bucket in Sydney, Australia
+curl -f -o /tmp/vyos.iso -L https://s3-ap-southeast-2.amazonaws.com/last-mile/vyos-999.201702022137-amd64.iso
 mkdir /mnt/cdsquash /mnt/cdrom /mnt/wroot
 mount -o loop,ro -t iso9660 /tmp/vyos.iso /mnt/cdrom
 mount -o loop,ro -t squashfs /mnt/cdrom/live/filesystem.squashfs /mnt/cdsquash/
@@ -32,8 +38,9 @@ cp -p /mnt/cdrom/live/filesystem.squashfs /mnt/wroot/boot/${VYOS_RELEASE}/${VYOS
 find /mnt/cdsquash/boot -maxdepth 1 \( -type f -o -type l \) -exec cp -dpv {} /mnt/wroot/boot/${VYOS_RELEASE}/ \;
 mkdir /mnt/squashfs
 mkdir /mnt/inst_root
+mkdir /mnt/wroot/workdir
 mount -o loop,ro -t squashfs /mnt/wroot/boot/${VYOS_RELEASE}/${VYOS_RELEASE}.squashfs /mnt/squashfs/
-mount -o noatime,upperdir=/mnt/wroot/boot/${VYOS_RELEASE}/live-rw,lowerdir=/mnt/squashfs -t overlayfs overlayfs /mnt/inst_root
+mount -o noatime,upperdir=/mnt/wroot/boot/${VYOS_RELEASE}/live-rw,lowerdir=/mnt/squashfs,workdir=/mnt/wroot/workdir -t overlayfs overlayfs /mnt/inst_root
 touch /mnt/inst_root/opt/vyatta/etc/config/.vyatta_config
 chroot --userspec=root:vyattacfg /mnt/inst_root/ cp /opt/vyatta/etc/config.boot.default /opt/vyatta/etc/config/config.boot
 chmod 0775 /mnt/inst_root/opt/vyatta/etc/config/config.boot
@@ -43,12 +50,18 @@ chmod 0775 /mnt/inst_root/opt/vyatta/etc/config/config.boot
 # 3. set hostname
 # TODO: the removal of "plaintext-password" works during build but something
 # puts it back as empty string during image boot.
+# sed -i -r \
+#   -e '/^interfaces \{/ a \    ethernet eth0 \{\n        address dhcp\n    \}' \
+#   -e '/^system \{/i service \{\n    ssh \{\n        disable-password-authentication\n        port 22\n    \}\n\}' \
+#   -e '/login \{/i \    host-name VyOS-AMI' \
+#   -e 's/^([[:blank:]]+)encrypted-password\b.*/\1encrypted-password "*"/' \
+#   -e '/^[[:blank:]]+plaintext-password/d' \
+#   /mnt/inst_root/opt/vyatta/etc/config/config.boot
+
+# TODO: DISABLED SSH SERVICE WHILE DEBUGGING
 sed -i -r \
   -e '/^interfaces \{/ a \    ethernet eth0 \{\n        address dhcp\n    \}' \
-  -e '/^system \{/i service \{\n    ssh \{\n        disable-password-authentication\n        port 22\n    \}\n\}' \
   -e '/login \{/i \    host-name VyOS-AMI' \
-  -e 's/^([[:blank:]]+)encrypted-password\b.*/\1encrypted-password "*"/' \
-  -e '/^[[:blank:]]+plaintext-password/d' \
   /mnt/inst_root/opt/vyatta/etc/config/config.boot
 
 mkdir /mnt/wroot/boot/grub
